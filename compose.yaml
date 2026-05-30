@@ -1,0 +1,9 @@
+services:
+  lightroom-sync:
+    build: .
+    volumes:
+      - /mnt/TankPool/media/photo_processing/CameraTransfer/camera/:/photos #Update to your photo directory
+      - /mnt/AppPool/docker/lightroomsync/data:/data #Move is you wish
+    env_file:
+      - .env
+    restart: unless-stopped

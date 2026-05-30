@@ -1,0 +1,4 @@
+requests
+watchdog
+python-dotenv
+exifread
