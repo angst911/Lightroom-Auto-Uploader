@@ -36,6 +36,10 @@ This document outlines the core requirements and architectural decisions for the
 *   **Proactive Refresh:** The service must track the Access Token expiration time and refresh it automatically before it expires.
 *   **Reactive Recovery:** The service must catch `401 Unauthorized` errors, force a token refresh, and automatically retry the failed operation.
 *   **Persistence:** Updated Refresh Tokens must be saved to `data/refresh_token.txt` to survive container restarts.
+*   **Refresh Token Absolute Expiry:** Adobe's refresh tokens here carry a hard ~14-day absolute expiry from creation, independent of the access token's lifetime. A dedicated keepalive loop must proactively refresh on a fixed schedule (well under 14 days) so token continuity never depends on there being regular upload activity — a photo-upload dry spell must not be able to silently expire the token.
+*   **Dead-Token Detection:** The service must distinguish a dead/revoked refresh token (Adobe's `invalid_grant` response on the IMS refresh call) from a routine expired access token. A dead refresh token is not retryable automatically — it must surface as a distinct, alertable failure state rather than failing silently per-upload.
+*   **Self-Service Re-Authentication:** The service must expose a web-based OAuth callback endpoint so a dead refresh token can be replaced by visiting a URL and logging into Adobe, with no shell access, manual code copy-pasting, or container restart required. A successful re-auth must take effect in the already-running process immediately.
+*   **Failure Alerting:** The service must notify (e.g. via webhook) when the refresh token is found to be dead, and again when it recovers -- once per state transition, not once per failed upload.
 
 ### 2.2 API Communication
 *   **Base URL:** `https://lr.adobe.io/v2`

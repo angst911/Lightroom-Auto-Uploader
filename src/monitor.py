@@ -54,6 +54,23 @@ def on_auth_failure(message: str):
 def on_auth_recovered():
     send_discord_alert("✅ LightroomSync: authentication recovered, uploads resumed.")
 
+def keepalive_loop(lr_api: LightroomAPI, interval_seconds: int = 86400):
+    """Adobe's refresh tokens here have a hard ~14-day absolute expiry from
+    creation, separate from the short-lived access token. Normal upload
+    activity refreshes (and rotates) it well within that window, but a
+    photo-upload dry spell of 2+ weeks would silently let it expire. Proactively
+    refresh on a fixed schedule so token continuity doesn't depend on upload
+    activity at all."""
+    while True:
+        time.sleep(interval_seconds)
+        try:
+            lr_api.refresh_access_token()
+            logger.info("Keepalive refresh succeeded.")
+        except RefreshTokenInvalidError:
+            pass  # on_auth_failure already alerted inside refresh_access_token
+        except Exception as e:
+            logger.error(f"Keepalive refresh failed unexpectedly: {e}")
+
 import hashlib
 
 class PhotoHandler(FileSystemEventHandler):
@@ -208,6 +225,9 @@ def main():
         logger.info(f"Web re-auth server listening on :{WEB_PORT} ({OAUTH_REDIRECT_BASE_URL}/auth/start)")
     else:
         logger.warning("OAUTH_REDIRECT_BASE_URL not set; the self-service re-auth web endpoint is disabled.")
+
+    keepalive_thread = threading.Thread(target=keepalive_loop, args=(lr_api,), daemon=True)
+    keepalive_thread.start()
 
     # Ensure album exists. If the refresh token is already dead at startup, don't
     # crash the whole process -- come up with album_id unresolved and let
