@@ -199,11 +199,19 @@ class PhotoHandler(FileSystemEventHandler):
 def main():
     client_id = os.getenv("ADOBE_CLIENT_ID")
     client_secret = os.getenv("ADOBE_CLIENT_SECRET")
+    # refresh_token may legitimately be empty on a brand-new deployment -- the
+    # web /auth/start flow handles first-time authentication too, not just
+    # recovery from a dead token, so we don't require it to start up.
     refresh_token = load_token()
 
-    if not all([client_id, client_secret, refresh_token]):
-        logger.error("Missing Adobe API credentials in environment variables or token file.")
+    if not all([client_id, client_secret]):
+        logger.error("Missing ADOBE_CLIENT_ID / ADOBE_CLIENT_SECRET in environment variables.")
         return
+    if not refresh_token:
+        logger.warning(
+            "No refresh token configured yet. Authenticate via the web endpoint "
+            "(OAUTH_REDIRECT_BASE_URL/auth/start) to get started."
+        )
 
     lr_api = LightroomAPI(
         client_id,

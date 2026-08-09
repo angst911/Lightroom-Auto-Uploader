@@ -85,7 +85,9 @@ class LightroomAPI:
         self.on_auth_failure = on_auth_failure
         # Called (once) when a refresh succeeds after a prior auth-failure state.
         self.on_auth_recovered = on_auth_recovered
-        self.auth_broken = False
+        # Starts broken if there's no refresh token yet at all (never authenticated),
+        # not just when a previously-working token dies later.
+        self.auth_broken = not bool(refresh_token)
 
     def update_refresh_token(self, new_refresh_token: str):
         """Called by the /auth/callback web flow after a successful manual re-auth.
@@ -99,6 +101,11 @@ class LightroomAPI:
         logger.info("Refresh token updated via manual re-authentication.")
 
     def refresh_access_token(self):
+        if not self.refresh_token:
+            # Never authenticated yet -- don't bother hitting the network.
+            # auth_broken is already True from __init__ in this case, so this
+            # won't re-fire on_auth_failure; it's an expected first-run state.
+            raise RefreshTokenInvalidError("No refresh token configured yet. Authenticate via /auth/start.")
         logger.info("Refreshing access token...")
         import time
         data = {
