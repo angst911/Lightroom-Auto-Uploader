@@ -110,18 +110,25 @@ class LightroomAPI:
         response = requests.post(self.IMS_URL, data=data, timeout=15)
 
         if response.status_code == 400:
+            # The only things that vary in this specific request are the static
+            # client_id/client_secret (if these were wrong, every refresh would
+            # always have failed, not just now) and refresh_token -- so any 400
+            # here means the refresh token itself is dead. Adobe's IMS doesn't
+            # consistently use the standard OAuth2 `invalid_grant` error code for
+            # this (observed `access_denied` for an expired token in practice),
+            # so don't try to pattern-match the exact error string.
             try:
                 err = response.json()
             except ValueError:
                 err = {}
-            if err.get("error") == "invalid_grant":
-                msg = err.get("error_description", "Refresh token is invalid, expired, or revoked.")
-                logger.error(f"Refresh token is dead: {msg}")
-                if not self.auth_broken:
-                    self.auth_broken = True
-                    if self.on_auth_failure:
-                        self.on_auth_failure(msg)
-                raise RefreshTokenInvalidError(msg)
+            error_code = err.get("error", "unknown_error")
+            msg = err.get("error_description") or f"Adobe rejected the refresh token ({error_code})."
+            logger.error(f"Refresh token is dead: {msg}")
+            if not self.auth_broken:
+                self.auth_broken = True
+                if self.on_auth_failure:
+                    self.on_auth_failure(msg)
+            raise RefreshTokenInvalidError(msg)
 
         response.raise_for_status()
         res_data = response.json()
