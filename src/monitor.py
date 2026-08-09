@@ -1,9 +1,10 @@
 import os
 import time
 import logging
+import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from lightroom import LightroomAPI
+from lightroom import LightroomAPI, RefreshTokenInvalidError
 from dotenv import load_dotenv
 
 # Setup logging
@@ -21,6 +22,9 @@ ALBUM_NAME = os.getenv("ALBUM_NAME", "Server_Auto_Upload")
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 UPLOAD_LOG = os.path.join(DATA_DIR, "uploaded_files.log")
 TOKEN_FILE = os.path.join(DATA_DIR, "refresh_token.txt")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL")
+WEB_PORT = int(os.getenv("WEB_PORT", "5000"))
 
 def save_token(token: str):
     with open(TOKEN_FILE, "w") as f:
@@ -33,14 +37,43 @@ def load_token():
             return f.read().strip()
     return os.getenv("ADOBE_REFRESH_TOKEN")
 
+def send_discord_alert(message: str):
+    if not DISCORD_WEBHOOK_URL:
+        logger.warning(f"DISCORD_WEBHOOK_URL not set; skipping alert: {message}")
+        return
+    try:
+        import requests
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
+    except Exception as e:
+        logger.error(f"Failed to send Discord alert: {e}")
+
+def on_auth_failure(message: str):
+    reauth_hint = f" Re-authenticate at {OAUTH_REDIRECT_BASE_URL}/auth/start" if OAUTH_REDIRECT_BASE_URL else ""
+    send_discord_alert(f"\U0001F534 LightroomSync: authentication broken, uploads are failing.\n{message}{reauth_hint}")
+
+def on_auth_recovered():
+    send_discord_alert("✅ LightroomSync: authentication recovered, uploads resumed.")
+
 import hashlib
 
 class PhotoHandler(FileSystemEventHandler):
-    def __init__(self, lr_api: LightroomAPI, album_id: str):
+    def __init__(self, lr_api: LightroomAPI, album_id: str = None):
         self.lr_api = lr_api
+        # May be None at startup if auth was broken then; resolved lazily per-file.
         self.album_id = album_id
         self.uploaded_hashes = self._load_uploaded_hashes()
         self.processing_files = set()
+
+    def _ensure_album_id(self) -> bool:
+        """Resolve the album ID if we don't have one yet. Returns False if auth
+        is still broken, so callers can skip processing without raising."""
+        if self.album_id:
+            return True
+        try:
+            self.album_id = self.lr_api.get_album_id(ALBUM_NAME) or self.lr_api.create_album(ALBUM_NAME)
+            return True
+        except RefreshTokenInvalidError:
+            return False
 
     def _load_uploaded_hashes(self):
         if os.path.exists(UPLOAD_LOG):
@@ -128,10 +161,19 @@ class PhotoHandler(FileSystemEventHandler):
                 logger.info(f"File {os.path.basename(file_path)} already uploaded (local hash match). Skipping.")
                 return
 
+            if not self._ensure_album_id():
+                logger.warning(
+                    f"Skipping {os.path.basename(file_path)}: authentication is broken. "
+                    f"It will be picked up on the next event once re-authenticated."
+                )
+                return
+
             # upload_photo now returns True if uploaded or already exists
             self.lr_api.upload_photo(file_path, self.album_id)
             # Log the hash so we don't check the API again for this file
             self._log_uploaded_hash(file_hash)
+        except RefreshTokenInvalidError:
+            logger.warning(f"Skipping {os.path.basename(file_path)}: authentication is broken.")
         except Exception as e:
             logger.error(f"Failed to process {file_path}: {e}")
         finally:
@@ -147,16 +189,39 @@ def main():
         return
 
     lr_api = LightroomAPI(
-        client_id, 
-        client_secret, 
-        refresh_token, 
-        token_update_callback=save_token
+        client_id,
+        client_secret,
+        refresh_token,
+        token_update_callback=save_token,
+        on_auth_failure=on_auth_failure,
+        on_auth_recovered=on_auth_recovered,
     )
-    
-    # Ensure album exists
-    album_id = lr_api.get_album_id(ALBUM_NAME)
-    if not album_id:
-        album_id = lr_api.create_album(ALBUM_NAME)
+
+    if OAUTH_REDIRECT_BASE_URL:
+        import web
+        web_thread = threading.Thread(
+            target=web.run_web_server,
+            args=(lr_api, client_id, client_secret, OAUTH_REDIRECT_BASE_URL, WEB_PORT),
+            daemon=True,
+        )
+        web_thread.start()
+        logger.info(f"Web re-auth server listening on :{WEB_PORT} ({OAUTH_REDIRECT_BASE_URL}/auth/start)")
+    else:
+        logger.warning("OAUTH_REDIRECT_BASE_URL not set; the self-service re-auth web endpoint is disabled.")
+
+    # Ensure album exists. If the refresh token is already dead at startup, don't
+    # crash the whole process -- come up with album_id unresolved and let
+    # PhotoHandler retry lazily once someone re-authenticates via the web flow.
+    album_id = None
+    try:
+        album_id = lr_api.get_album_id(ALBUM_NAME)
+        if not album_id:
+            album_id = lr_api.create_album(ALBUM_NAME)
+    except RefreshTokenInvalidError:
+        logger.error(
+            "Startup album lookup failed: authentication is broken. "
+            "Monitoring will still start; re-authenticate via the web flow to resume uploads."
+        )
 
     # Initial scan of the directory
     handler = PhotoHandler(lr_api, album_id)

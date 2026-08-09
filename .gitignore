@@ -1,0 +1,24 @@
+# Secrets and local configurations
+*.env
+.env
+.env.*
+credentials.json
+
+# Local dependencies (the container should install its own)
+node_modules/
+vendor/
+.venv/
+ENV/
+
+# Local build artifacts and caches
+dist/
+build/
+target/
+.cache/
+*.log
+__pycache__/
+*.pyc
+
+# Editor files
+.vscode/
+.idea/

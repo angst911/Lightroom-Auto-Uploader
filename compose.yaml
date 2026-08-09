@@ -6,4 +6,14 @@ services:
       - /mnt/AppPool/docker/lightroomsync/data:/data #Move is you wish
     env_file:
       - .env
+    networks:
+      - caddy
+    labels:
+      caddy: lightroomsync.anomaly.cx
+      caddy.reverse_proxy: http://{{upstreams 5000}}
+      pihole.custom-record: '[["lightroomsync.anomaly.cx", "192.168.1.40"]]'
+      wud.trigger.include: discord.1
     restart: unless-stopped
+networks:
+  caddy:
+    external: true

@@ -11,6 +11,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TokenExpiredError(Exception):
+    """The short-lived access token expired; a normal refresh will fix this."""
+    pass
+
+class RefreshTokenInvalidError(Exception):
+    """The refresh token itself is dead (revoked/expired). Requires re-authentication
+    via the /auth/start web flow -- a normal refresh cannot recover from this."""
     pass
 
 def retry_on_token_expiry(func):
@@ -64,7 +70,8 @@ class LightroomAPI:
     BASE_URL = "https://lr.adobe.io/v2"
     IMS_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 
-    def __init__(self, client_id: str, client_secret: str, refresh_token: str, token_update_callback=None):
+    def __init__(self, client_id: str, client_secret: str, refresh_token: str,
+                 token_update_callback=None, on_auth_failure=None, on_auth_recovered=None):
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
@@ -73,6 +80,23 @@ class LightroomAPI:
         self.catalog_id = None
         self.account_id = None
         self.token_update_callback = token_update_callback
+        # Called (once, until recovered) with an error message when the refresh
+        # token itself is found to be dead -- not on routine access-token refreshes.
+        self.on_auth_failure = on_auth_failure
+        # Called (once) when a refresh succeeds after a prior auth-failure state.
+        self.on_auth_recovered = on_auth_recovered
+        self.auth_broken = False
+
+    def update_refresh_token(self, new_refresh_token: str):
+        """Called by the /auth/callback web flow after a successful manual re-auth.
+        Hot-swaps the token in the running process -- no container restart needed."""
+        self.refresh_token = new_refresh_token
+        self.access_token = None
+        self.access_token_expires_at = 0
+        self.auth_broken = False
+        if self.token_update_callback:
+            self.token_update_callback(self.refresh_token)
+        logger.info("Refresh token updated via manual re-authentication.")
 
     def refresh_access_token(self):
         logger.info("Refreshing access token...")
@@ -83,20 +107,40 @@ class LightroomAPI:
             "client_secret": self.client_secret,
             "refresh_token": self.refresh_token,
         }
-        response = requests.post(self.IMS_URL, data=data)
+        response = requests.post(self.IMS_URL, data=data, timeout=15)
+
+        if response.status_code == 400:
+            try:
+                err = response.json()
+            except ValueError:
+                err = {}
+            if err.get("error") == "invalid_grant":
+                msg = err.get("error_description", "Refresh token is invalid, expired, or revoked.")
+                logger.error(f"Refresh token is dead: {msg}")
+                if not self.auth_broken:
+                    self.auth_broken = True
+                    if self.on_auth_failure:
+                        self.on_auth_failure(msg)
+                raise RefreshTokenInvalidError(msg)
+
         response.raise_for_status()
         res_data = response.json()
-        
+
         self.access_token = res_data["access_token"]
         expires_in = res_data.get("expires_in", 86400)
         self.access_token_expires_at = time.time() + expires_in - 300
-        
+
         if "refresh_token" in res_data:
             self.refresh_token = res_data["refresh_token"]
             logger.info("New refresh token received.")
             if self.token_update_callback:
                 self.token_update_callback(self.refresh_token)
         logger.info(f"Access token refreshed. Expires in {expires_in}s.")
+
+        if self.auth_broken:
+            self.auth_broken = False
+            if self.on_auth_recovered:
+                self.on_auth_recovered()
 
     def _get_headers(self):
         import time
